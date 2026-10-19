@@ -26,8 +26,8 @@ and a one-click (or automatic) diagnostics mode that finds out *why* your connec
 * Settings are stored in `%APPDATA%\PingRate\settings.json`; history in `%APPDATA%\PingRate\history.db`.
 
 ## Optional: echo server (per-direction loss)
-Run `echo_server.py` (included next to the exe, or `tools/echo_server.py`) on a machine outside your network
-(VPS / friend's PC): `python echo_server.py 40404`, open **UDP 40404**, then enter `host:40404` in Settings → Echo server.
+Run `PingRateEchoServer.exe` (or `python tools/echo_server.py`) on a machine outside your network
+(VPS / friend's PC): `PingRateEchoServer.exe 40404`, open **UDP 40404**, then enter `host:40404` in Settings → Echo server.
 
 ## Build the exe
 `build.bat` on Windows (or let the GitHub Action build it – download the `PingRate-windows` artifact).

@@ -14,7 +14,7 @@ MAGIC = b"PRv1"
 port = int(sys.argv[1]) if len(sys.argv) > 1 else 40404
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 sock.bind(("0.0.0.0", port))
-sessions: dict[bytes, set] = {}
+sessions = {}
 print(f"PingRate echo server listening on UDP {port}")
 while True:
     data, addr = sock.recvfrom(512)

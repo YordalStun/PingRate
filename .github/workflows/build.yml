@@ -3,6 +3,8 @@ on:
   push:
     branches: [main, "claude/**"]
   workflow_dispatch:
+permissions:
+  contents: write
 jobs:
   build:
     runs-on: windows-latest
@@ -15,9 +17,24 @@ jobs:
       - run: python -m pytest -q tests
       - run: ./build.bat
         shell: cmd
+      - name: Smoke-test the echo server exe starts
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath dist\PingRateEchoServer.exe -PassThru
+          Start-Sleep 3
+          if ($p.HasExited) { throw "echo server exe exited immediately" }
+          Stop-Process $p
       - uses: actions/upload-artifact@v4
         with:
           name: PingRate-windows
           path: |
             dist/PingRate.exe
-            dist/echo_server.py
+            dist/PingRateEchoServer.exe
+      - name: Publish download link (release "latest-build")
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest-build --yes --cleanup-tag 2>$null
+          gh release create latest-build dist/PingRate.exe dist/PingRateEchoServer.exe --prerelease `
+            --title "Latest build" --notes "Automatic build of ${{ github.sha }} (branch ${{ github.ref_name }})"
