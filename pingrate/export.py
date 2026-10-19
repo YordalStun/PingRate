@@ -170,6 +170,16 @@ def build_report(settings, monitors, diag_results=None, diag_verdict=None, hist=
                 parts.append(f"      {v[:600]}")
                 bad = [x for x in r["results"] if x.get("status") in ("fail", "warn")]
                 parts += [f"      {x['status'].upper():4} {x['name']}: {x['summary']}" for x in bad]
+    if hist:
+        from .diag.tests import METRIC_INFO
+        parts += ["", "=" * 70, "TEST METRIC HISTORY (every diagnostics run: time=value, oldest -> newest, up to 300 points each)", "=" * 70]
+        for k in hist.metric_keys():
+            lab, unit = METRIC_INFO.get(k, (k, ""))
+            ser = hist.metric_series(k)[-300:]
+            parts.append(f"{lab} [{k}, {unit}] ({len(ser)} runs): " +
+                         "  ".join(f"{time.strftime('%m-%d %H:%M', time.localtime(t))}={v:.1f}" for t, v in ser))
+        if not hist.metric_keys():
+            parts.append("(no completed diagnostics runs stored yet)")
     parts += ["", "=" * 70, "MACHINE-READABLE SUMMARY (JSON)", "=" * 70,
               json.dumps(dict(version=__version__, time=_ts(time.time()), targets=jtargets, diagnostics=dj,
                               conclusions=diag_verdict or []), indent=1, default=str)]

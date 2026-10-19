@@ -28,6 +28,7 @@ class Context:
     targets: list = field(default_factory=list)     # [(name, level, title, detail)]
     cancel: threading.Event = field(default_factory=threading.Event)
     progress: object = lambda msg: None
+    skip: set = field(default_factory=set)         # test keys to skip, e.g. {'speed','video'}
     results: dict = field(default_factory=dict)
 
 
@@ -77,7 +78,7 @@ def t_gateway(c: Context) -> Result:
 
 def t_internet(c: Context) -> Result:
     r = Result("internet", "Internet reachability (ping)")
-    bad, parts = 0, []
+    bad, parts, losses, avgs = 0, [], [], []
     for ip in ("1.1.1.1", "8.8.8.8", "9.9.9.9"):
         if c.cancel.is_set():
             break
@@ -85,8 +86,13 @@ def t_internet(c: Context) -> Result:
         loss, avg, _ = _stat(_pings(ip, 10, gap=0.05))
         parts.append(f"{ip}: {loss:.0f}% loss" + (f", {avg:.0f} ms" if avg else ""))
         bad += loss >= 99
+        losses.append(loss)
+        if avg:
+            avgs.append(avg)
+    avg_loss = sum(losses) / len(losses) if losses else None
+    avg_ms = sum(avgs) / len(avgs) if avgs else None
     r.details = parts
-    r.data = {"all_down": bad == 3}
+    r.data = {"all_down": bad == 3, "loss": avg_loss, "avg": avg_ms}
     r.status = FAIL if bad == 3 else WARN if bad else PASS
     r.summary = "No internet servers answer" if bad == 3 else "Some servers do not answer" if bad else "Internet servers reachable"
     return r
@@ -104,8 +110,8 @@ def t_dns(c: Context) -> Result:
         udp_fail += all(x is None for x in m)
         r.details.append(f"Direct to {srv}: " + ", ".join(f"{'%.0f ms' % x if x else 'FAILED'}" for x in m))
     sys_fail = sum(m is None for m in sysms)
-    r.data = {"sys_fail": sys_fail, "udp_fail": udp_fail}
     ok = [m for m in sysms if m]
+    r.data = {"sys_fail": sys_fail, "udp_fail": udp_fail, "avg": statistics.mean(ok) if ok else None}
     if sys_fail == 3:
         r.status, r.summary = FAIL, "System DNS is not working"
     elif sys_fail:
@@ -222,6 +228,7 @@ def t_echo(c: Context) -> Result:
 def t_websites(c: Context) -> Result:
     r = Result("web", "Websites actually load")
     good = 0
+    times = []
     sites = c.settings.websites
     for u in sites:
         if c.cancel.is_set():
@@ -230,11 +237,12 @@ def t_websites(c: Context) -> Result:
         p = net.http_probe(u)
         if p.get("ok"):
             good += 1
+            times.append(p["total"])
             r.details.append(f"✔ {u} – HTTP {p['status']}, {p['bytes'] // 1024} KB, DNS {p['dns']:.0f} / connect "
                              f"{p['connect']:.0f} / TLS {p['tls']:.0f} / first byte {p['ttfb']:.0f} ms, total {p['total']:.0f} ms")
         else:
             r.details.append(f"✘ {u} – {p.get('error') or 'HTTP ' + str(p.get('status'))}")
-    r.data = {"good": good, "n": len(sites)}
+    r.data = {"good": good, "n": len(sites), "avg": statistics.mean(times) if times else None}
     r.status = FAIL if good == 0 else WARN if good < len(sites) else PASS
     r.summary = f"{good}/{len(sites)} websites loaded completely"
     return r
@@ -356,7 +364,10 @@ def run_all(c: Context, on_result=lambda r: None) -> list[Result]:
         if c.cancel.is_set():
             break
         try:
-            res = fn(c)
+            if fn.__name__[2:] in c.skip:
+                res = Result(fn.__name__[2:], fn.__name__[2:].title(), SKIP, "Skipped in scheduled runs (enable in Settings)")
+            else:
+                res = fn(c)
         except Exception as e:                        # a broken test must not kill the run
             res = Result(fn.__name__, fn.__name__[2:], WARN, f"Test crashed: {e}")
         c.results[res.key] = res
@@ -431,3 +442,47 @@ def verdict(results: dict[str, Result]) -> list[tuple[str, str]]:
         out.append(("ok", "No problems found. Everything tested works. If trouble is intermittent, leave monitoring running "
                           "– diagnostics will re-run automatically when a target stops answering."))
     return out
+
+
+# --------------------------------------------------------------------------- numbers for trend graphs
+METRIC_INFO = {   # key -> (label, unit)
+    "router_ms": ("Router ping", "ms"), "internet_ms": ("Internet ping", "ms"), "router_loss": ("Router loss", "%"),
+    "internet_loss": ("Internet loss", "%"), "dns_ms": ("DNS lookup", "ms"), "web_ms": ("Website load (avg)", "ms"),
+    "web_ok_pct": ("Websites loaded", "%"), "tcp_ok": ("TCP connections OK", "of 6"),
+    "udp_loss": ("UDP loss (game traffic)", "%"), "udp_ports_ok": ("UDP source ports OK", "of 12"),
+    "nat_strict": ("Strict NAT (1=yes)", ""), "echo_up_loss": ("Upload loss (echo server)", "%"),
+    "echo_down_loss": ("Download loss (echo server)", "%"), "speed_down": ("Download", "Mbps"),
+    "speed_up": ("Upload", "Mbps"), "bloat_down": ("Extra ping under download", "ms"),
+    "bloat_up": ("Extra ping under upload", "ms"), "video_startup_s": ("Video start time", "s"),
+    "video_stalls": ("Video stalls", ""), "video_stall_s": ("Video frozen time", "s"), "video_mbps": ("Video throughput", "Mbps"),
+}
+
+
+def metrics(results: dict) -> dict[str, float]:
+    m: dict[str, float] = {}
+
+    def put(k, v):
+        if v is not None:
+            m[k] = float(v)
+    d = lambda key: (results[key].data if key in results and results[key].status != SKIP else {}) or {}
+    g, i, n, t, u, e, w, sp, v = (d(k) for k in ("gateway", "internet", "dns", "tcp", "udp", "echo", "web", "speed", "video"))
+    put("router_ms", g.get("avg")); put("router_loss", g.get("loss"))
+    put("internet_ms", i.get("avg")); put("internet_loss", i.get("loss"))
+    put("dns_ms", n.get("avg")); put("tcp_ok", t.get("ok"))
+    put("udp_loss", u.get("loss")); put("udp_ports_ok", u.get("ports_ok"))
+    if u.get("nat") in ("open", "strict"):
+        put("nat_strict", 1 if u["nat"] == "strict" else 0)
+    put("echo_up_loss", e.get("up_loss")); put("echo_down_loss", e.get("down_loss"))
+    if w.get("n"):
+        put("web_ok_pct", 100.0 * w["good"] / w["n"])
+    put("web_ms", w.get("avg"))
+    put("speed_down", sp.get("down")); put("speed_up", sp.get("up"))
+    put("bloat_down", sp.get("bloat_down")); put("bloat_up", sp.get("bloat_up"))
+    if v.get("loaded"):
+        put("video_startup_s", v.get("startup")); put("video_stalls", v.get("stalls"))
+        put("video_stall_s", v.get("stall_time")); put("video_mbps", v.get("mbps"))
+    return m
+
+
+def statuses(results: dict) -> dict[str, tuple[str, str]]:
+    return {k: (r.status, r.summary) for k, r in results.items() if r.status != SKIP}

@@ -28,6 +28,7 @@ class DiagnosticsDialog(QDialog):
         super().__init__(parent)
         self.settings, self.collect_targets, self.history = settings, collect_targets, history
         self.last_verdict: list = []
+        self.scheduled = False
         self.setWindowTitle("PingRate – Diagnostics")
         self.resize(900, 680)
         self.bridge = Bridge()
@@ -63,15 +64,17 @@ class DiagnosticsDialog(QDialog):
         lay.addLayout(row)
 
     # ------------------------------------------------------------------
-    def start(self, reason: str = ""):
+    def start(self, reason: str = "", scheduled: bool = False):
         if self.running:
             return
+        self.scheduled = scheduled
         self.reason.setText(reason if isinstance(reason, str) else "")
         self.reason.setVisible(bool(self.reason.text()))
         self.tree.clear(); self.results = {}; self.bar.setValue(0)
         self.vtitle.setText("Running tests…"); self.vtext.setText("Please wait – this takes about a minute.")
         self._color(theme.ACCENT)
-        self.ctx = tests.Context(self.settings, self.collect_targets(), progress=self.bridge.progress.emit)
+        skip = {"speed", "video"} if scheduled and not self.settings.sched_heavy else set()
+        self.ctx = tests.Context(self.settings, self.collect_targets(), progress=self.bridge.progress.emit, skip=skip)
         self.running = True
         self.btn_run.setEnabled(False); self.btn_stop.setEnabled(True)
         self.started = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -109,7 +112,8 @@ class DiagnosticsDialog(QDialog):
         self.vtext.setText("\n\n".join(("• " + s) for _, s in v))
         self._color(theme.LEVEL[worst])
         if self.history and self.results and not self.ctx.cancel.is_set():
-            self.history.save_diag(self.reason.text(), [dataclasses.asdict(r) for r in self.results.values()], v, self.report())
+            self.history.save_diag(self.reason.text(), [dataclasses.asdict(r) for r in self.results.values()], v, self.report(),
+                                   tests.metrics(self.results), tests.statuses(self.results), getattr(self, 'scheduled', False))
         self.completed.emit()
 
     def _color(self, col):

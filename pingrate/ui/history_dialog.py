@@ -6,9 +6,10 @@ import pyqtgraph as pg
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QBrush, QColor, QGuiApplication
 from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDialog, QHBoxLayout, QHeaderView, QLabel, QPlainTextEdit,
-                               QPushButton, QSplitter, QTableWidget, QTableWidgetItem, QTabWidget, QTreeWidget,
+                               QPushButton, QScrollArea, QSplitter, QTableWidget, QTableWidgetItem, QTabWidget, QTreeWidget,
                                QTreeWidgetItem, QVBoxLayout, QWidget)
 
+from ..diag.tests import METRIC_INFO
 from . import theme
 
 RANGES = {"Last 24 hours": 1, "Last 3 days": 3, "Last 7 days": 7}
@@ -24,6 +25,81 @@ def _table(cols):
     t.verticalHeader().setVisible(False)
     t.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
     return t
+
+
+TREND_RANGES = {"Last 24 hours": 1, "Last 3 days": 3, "Last 7 days": 7, "Last 30 days": 30, "All time": 0}
+GROUPS = [
+    ("Speed (Mbps)", ["speed_down", "speed_up"]),
+    ("Bufferbloat – extra ping while line is busy (ms)", ["bloat_down", "bloat_up"]),
+    ("UDP / game-traffic loss (%)", ["udp_loss", "echo_up_loss", "echo_down_loss"]),
+    ("Ping to router & internet (ms)", ["router_ms", "internet_ms"]),
+    ("Loss to router & internet (%)", ["router_loss", "internet_loss"]),
+    ("DNS & website load time (ms)", ["dns_ms", "web_ms"]),
+    ("Websites loaded (%)  ·  UDP source ports OK (of 12)", ["web_ok_pct", "udp_ports_ok"]),
+    ("Video test: start time & frozen time (s)", ["video_startup_s", "video_stall_s"]),
+    ("Video test: stalls  ·  throughput (Mbps)", ["video_stalls", "video_mbps"]),
+]
+COLORS = [theme.ACCENT, theme.GOOD, theme.WARN, "#b18cff", theme.BAD]
+STATUS_COL = {"pass": theme.GOOD, "warn": theme.WARN, "fail": theme.BAD}
+
+
+class TrendsTab(QWidget):
+    def __init__(self, history):
+        super().__init__()
+        self.h = history
+        v = QVBoxLayout(self)
+        row = QHBoxLayout()
+        self.range = QComboBox(); self.range.addItems(TREND_RANGES); self.range.setCurrentIndex(2)
+        self.range.currentIndexChanged.connect(self.refresh)
+        self.info = QLabel(""); self.info.setStyleSheet(f"color:{theme.MUTED};")
+        b = QPushButton("Refresh"); b.clicked.connect(self.refresh)
+        row.addWidget(QLabel("Range:")); row.addWidget(self.range); row.addWidget(b); row.addWidget(self.info, 1)
+        v.addLayout(row)
+        self.area = QScrollArea(); self.area.setWidgetResizable(True); self.area.setFrameShape(QScrollArea.Shape.NoFrame); self.area.setStyleSheet(f'QScrollArea{{background:{theme.BG};border:0;}}')
+        v.addWidget(self.area, 1)
+
+    def refresh(self):
+        days = TREND_RANGES[self.range.currentText()]
+        since = time.time() - days * 86400 if days else 0
+        inner = QWidget(); inner.setObjectName('root'); lay = QVBoxLayout(inner); lay.setSpacing(10)
+        pg.setConfigOptions(antialias=True, background=theme.PANEL, foreground=theme.MUTED)
+        plots = []
+        stat = self.h.status_series(since)
+        nruns = len({t for t, _, _ in stat})
+        self.info.setText(f"{nruns} test run(s) in this range" if nruns else
+                          "No test runs yet – press Diagnostics, or set 'Run tests every…' in Settings to build history automatically.")
+        if stat:
+            keys = list(dict.fromkeys(k for _, k, _ in stat))
+            pl = pg.PlotWidget(axisItems={"bottom": pg.DateAxisItem()})
+            pl.setMinimumHeight(70 + 34 * len(keys)); pl.setTitle("Pass / warn / fail per test", color=theme.MUTED, size="10pt")
+            pl.showGrid(x=True, y=False, alpha=0.15); pl.setMouseEnabled(True, False); pl.hideButtons()
+            pl.getAxis("left").setWidth(80)
+            pl.getAxis("left").setTicks([[(i, k) for i, k in enumerate(keys)]])
+            pl.setYRange(-0.7, len(keys) - 0.3, padding=0)
+            idx = {k: i for i, k in enumerate(keys)}
+            pl.addItem(pg.ScatterPlotItem(x=[t for t, _, _ in stat], y=[idx[k] for _, k, _ in stat], symbol="s", size=11,
+                                          pen=None, brush=[pg.mkBrush(STATUS_COL.get(st, theme.MUTED)) for _, _, st in stat]))
+            lay.addWidget(pl); plots.append(pl)
+        for title, keys in GROUPS:
+            data = [(k, self.h.metric_series(k, since)) for k in keys]
+            data = [(k, ser) for k, ser in data if ser]
+            if not data:
+                continue
+            pl = pg.PlotWidget(axisItems={"bottom": pg.DateAxisItem()})
+            pl.setMinimumHeight(190); pl.setTitle(title, color=theme.TEXT, size="11pt")
+            pl.showGrid(x=True, y=True, alpha=0.15); pl.setMouseEnabled(True, False); pl.hideButtons()
+            pl.addLegend(offset=(-10, 10))
+            for n, (k, ser) in enumerate(data):
+                c = COLORS[n % len(COLORS)]
+                lab, unit = METRIC_INFO.get(k, (k, ""))
+                pl.plot([t for t, _ in ser], [v for _, v in ser], pen=pg.mkPen(c, width=2), symbol="o", symbolSize=6,
+                        symbolBrush=c, symbolPen=None, name=f"{lab} ({unit})" if unit else lab)
+            pl.getViewBox().setLimits(yMin=0)
+            lay.addWidget(pl); plots.append(pl)
+        for p in plots[1:]:
+            p.setXLink(plots[0])
+        lay.addStretch()
+        self.area.setWidget(inner)
 
 
 class HistoryDialog(QDialog):
@@ -58,10 +134,13 @@ class HistoryDialog(QDialog):
         v.addWidget(sp, 2)
         tabs.addTab(w, "Connection history")
 
+        self.trends = TrendsTab(self.h)
+        tabs.addTab(self.trends, "Test trends")
+
         # ---- diagnostics runs
         d = QWidget(); dv = QVBoxLayout(d)
         s2 = QSplitter(Qt.Orientation.Horizontal)
-        self.runs = QTreeWidget(); self.runs.setHeaderLabels(["When", "Result"]); self.runs.setColumnWidth(0, 150)
+        self.runs = QTreeWidget(); self.runs.setHeaderLabels(["When", "Result"]); self.runs.setColumnWidth(0, 190)
         self.runs.currentItemChanged.connect(self._show_run)
         self.report = QPlainTextEdit(); self.report.setReadOnly(True)
         self.report.setStyleSheet("font-family: Consolas, 'Courier New', monospace; font-size: 12px;")
@@ -69,7 +148,7 @@ class HistoryDialog(QDialog):
         dv.addWidget(s2)
         bc = QPushButton("Copy selected report"); bc.clicked.connect(lambda: QGuiApplication.clipboard().setText(self.report.toPlainText()))
         dv.addWidget(bc, 0, Qt.AlignmentFlag.AlignRight)
-        tabs.addTab(d, "Diagnostics runs")
+        tabs.addTab(d, "All test runs")
         self.target.currentIndexChanged.connect(self.refresh)
         self.range.currentIndexChanged.connect(self.refresh)
 
@@ -111,6 +190,7 @@ class HistoryDialog(QDialog):
             self.p_loss.setXRange(since, time.time(), padding=0)
             self._fill_out(self.h.outages(t, since)); self._fill_hops(self.h.hop_loss(t, since))
         self._fill_runs()
+        self.trends.refresh()
 
     def _fill_out(self, outs):
         self.t_out.setRowCount(len(outs))
@@ -133,12 +213,12 @@ class HistoryDialog(QDialog):
 
     def _fill_runs(self):
         self.runs.clear()
-        for r in self.h.diag_runs():
+        for r in self.h.diag_runs(with_report=False):
             worst = "bad" if any(l == "bad" for l, _ in r["verdict"]) else "warn" if any(l == "warn" for l, _ in r["verdict"]) else "ok"
-            it = QTreeWidgetItem([_t(r["ts"]), (r["verdict"][0][1] if r["verdict"] else "")[:90]])
+            it = QTreeWidgetItem([_t(r["ts"]) + ("  ⏱" if r["scheduled"] else ""), (r["verdict"][0][1] if r["verdict"] else "")[:90]])
             it.setForeground(1, QBrush(QColor(theme.LEVEL[worst])))
-            it.setData(0, Qt.ItemDataRole.UserRole, r["report"])
-            it.setToolTip(1, r["reason"] or "manual run")
+            it.setData(0, Qt.ItemDataRole.UserRole, r["id"])
+            it.setToolTip(1, r["reason"] or "manual run"); it.setToolTip(0, "⏱ = scheduled background run")
             self.runs.addTopLevelItem(it)
         if self.runs.topLevelItemCount():
             self.runs.setCurrentItem(self.runs.topLevelItem(0))
@@ -147,4 +227,4 @@ class HistoryDialog(QDialog):
 
     def _show_run(self, cur, _prev):
         if cur:
-            self.report.setPlainText(cur.data(0, Qt.ItemDataRole.UserRole) or "")
+            self.report.setPlainText(self.h.get_report(cur.data(0, Qt.ItemDataRole.UserRole)))

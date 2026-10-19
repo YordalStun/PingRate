@@ -16,6 +16,10 @@ and a one-click (or automatic) diagnostics mode that finds out *why* your connec
 * **History** – every probe (destination and each hop) is stored locally as per-minute data for 8 days. The
   📈 History window shows a week of loss and latency per target, a list of outages, per-hop loss over the period, and
   every past diagnostics run with its full report.
+* **Test trends** – every diagnostics run stores its numbers (speed up/down, bufferbloat, UDP loss, router/internet ping,
+  DNS, website load, video start/stalls, …) **forever**, plotted over time (24 h … all time) with a pass/warn/fail
+  timeline per test. Only the long text reports expire after 30 days. Set *Settings → Run tests every N minutes* to build
+  this history automatically in the background (speed/video are skipped unless you opt in, to save data).
 * **Full output** – the 📄 button saves one text file with everything (system/adapter info, settings, live route +
   raw probes, the 7-day history, diagnostics results, JSON summary) prefixed with instructions, ready to paste to an AI
   or send to support. It can run fresh diagnostics first.

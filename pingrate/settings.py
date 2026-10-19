@@ -28,6 +28,8 @@ class Settings:
     websites: list[str] = field(default_factory=lambda: [
         "https://www.google.com", "https://www.cloudflare.com", "https://www.wikipedia.org",
         "https://www.amazon.com", "https://www.youtube.com"])
+    sched_minutes: int = 0           # run diagnostics in the background every N minutes (0 = off)
+    sched_heavy: bool = False        # include speed + video tests (uses bandwidth) in scheduled runs
     video_url: str = ""              # blank = built-in list of sample videos
 
     @classmethod

@@ -16,7 +16,11 @@ CREATE TABLE IF NOT EXISTS minute(
   PRIMARY KEY(target, ttl, ts));
 CREATE TABLE IF NOT EXISTS diag(
   id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, reason TEXT,
-  verdict TEXT, results TEXT, report TEXT);
+  verdict TEXT, results TEXT, report TEXT, scheduled INTEGER DEFAULT 0);
+CREATE TABLE IF NOT EXISTS diagmetric(
+  run_id INTEGER NOT NULL, key TEXT NOT NULL, value REAL NOT NULL, PRIMARY KEY(run_id, key));
+CREATE TABLE IF NOT EXISTS diagstatus(
+  run_id INTEGER NOT NULL, key TEXT NOT NULL, status TEXT NOT NULL, summary TEXT, PRIMARY KEY(run_id, key));
 """
 _UPSERT = """
 INSERT INTO minute(target,ttl,ts,addr,sent,recv,sum,min,max) VALUES(?,?,?,?,?,?,?,?,?)
@@ -37,6 +41,10 @@ class History:
         self.buf: dict[tuple, list] = {}
         with self.lock:
             self.db.executescript(_SCHEMA)
+            try:
+                self.db.execute("ALTER TABLE diag ADD COLUMN scheduled INTEGER DEFAULT 0")
+            except sqlite3.Error:
+                pass
             self.prune()
         if autoflush:
             threading.Thread(target=self._loop, daemon=True, name="history-flush").start()
@@ -78,7 +86,8 @@ class History:
         cut = int(time.time() - KEEP_DAYS * 86400)
         try:
             self.db.execute("DELETE FROM minute WHERE ts<?", (cut,))
-            self.db.execute("DELETE FROM diag WHERE ts<?", (cut - 22 * 86400,))   # reports kept 30 days
+            # test results (numbers/statuses) are kept forever; only the bulky text reports expire after 30 days
+            self.db.execute("UPDATE diag SET report='', results='[]' WHERE ts<? AND report<>''", (time.time() - 30 * 86400,))
             self.db.commit()
         except sqlite3.Error:
             pass
@@ -140,19 +149,45 @@ class History:
         return out
 
     # ------------------------------------------------------------------ diagnostics runs
-    def save_diag(self, reason: str, results: list[dict], verdict: list, report: str) -> int:
+    def save_diag(self, reason: str, results: list[dict], verdict: list, report: str,
+                  metrics: dict | None = None, statuses: dict | None = None, scheduled: bool = False) -> int:
         with self.lock:
-            cur = self.db.execute("INSERT INTO diag(ts,reason,verdict,results,report) VALUES(?,?,?,?,?)",
-                                  (int(time.time()), reason, json.dumps(verdict), json.dumps(results), report))
+            cur = self.db.execute("INSERT INTO diag(ts,reason,verdict,results,report,scheduled) VALUES(?,?,?,?,?,?)",
+                                  (int(time.time()), reason, json.dumps(verdict), json.dumps(results, default=str), report,
+                                   int(scheduled)))
+            rid = cur.lastrowid
+            self.db.executemany("INSERT OR REPLACE INTO diagmetric(run_id,key,value) VALUES(?,?,?)",
+                                [(rid, k, v) for k, v in (metrics or {}).items()])
+            self.db.executemany("INSERT OR REPLACE INTO diagstatus(run_id,key,status,summary) VALUES(?,?,?,?)",
+                                [(rid, k, st, sm) for k, (st, sm) in (statuses or {}).items()])
             self.db.commit()
-            return cur.lastrowid
+            return rid
 
-    def diag_runs(self, limit: int = 100) -> list[dict]:
+    def diag_runs(self, limit: int = 5000, with_report: bool = True) -> list[dict]:
+        cols = "id,ts,reason,verdict,results,report,scheduled" if with_report else "id,ts,reason,verdict,'[]','',scheduled"
         with self.lock:
-            rows = self.db.execute("SELECT id,ts,reason,verdict,results,report FROM diag ORDER BY ts DESC LIMIT ?",
-                                   (limit,)).fetchall()
+            rows = self.db.execute(f"SELECT {cols} FROM diag ORDER BY ts DESC LIMIT ?", (limit,)).fetchall()
         return [dict(id=i, ts=ts, reason=r or "", verdict=json.loads(v or "[]"), results=json.loads(res or "[]"),
-                     report=rep or "") for i, ts, r, v, res, rep in rows]
+                     report=rep or "", scheduled=bool(sch)) for i, ts, r, v, res, rep, sch in rows]
+
+    def get_report(self, run_id: int) -> str:
+        with self.lock:
+            r = self.db.execute("SELECT report FROM diag WHERE id=?", (run_id,)).fetchone()
+        return (r[0] if r else "") or "(text report expired after 30 days – the numbers are still in the trend graphs)"
+
+    def metric_keys(self) -> list[str]:
+        with self.lock:
+            return [r[0] for r in self.db.execute("SELECT DISTINCT key FROM diagmetric ORDER BY key")]
+
+    def metric_series(self, key: str, since: float = 0) -> list[tuple[int, float]]:
+        with self.lock:
+            return self.db.execute("SELECT d.ts, m.value FROM diagmetric m JOIN diag d ON d.id=m.run_id "
+                                   "WHERE m.key=? AND d.ts>=? ORDER BY d.ts", (key, int(since))).fetchall()
+
+    def status_series(self, since: float = 0) -> list[tuple[int, str, str]]:
+        with self.lock:
+            return self.db.execute("SELECT d.ts, s.key, s.status FROM diagstatus s JOIN diag d ON d.id=s.run_id "
+                                   "WHERE d.ts>=? ORDER BY d.ts", (int(since),)).fetchall()
 
     def close(self):
         self.flush()

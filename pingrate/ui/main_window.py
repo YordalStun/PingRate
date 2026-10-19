@@ -22,7 +22,7 @@ from .target_tab import TargetTab
 class SettingsDialog(QDialog):
     def __init__(self, s: Settings, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Settings"); self.resize(520, 440)
+        self.setWindowTitle("Settings"); self.resize(560, 520)
         f = QFormLayout(self)
         self.interval = QDoubleSpinBox(); self.interval.setRange(0.2, 30); self.interval.setSingleStep(0.5); self.interval.setValue(s.interval); self.interval.setSuffix(" s")
         self.auto = QCheckBox("Run diagnostics automatically when a target stops responding"); self.auto.setChecked(s.auto_diag)
@@ -30,15 +30,19 @@ class SettingsDialog(QDialog):
         self.cool = QSpinBox(); self.cool.setRange(1, 240); self.cool.setValue(s.cooldown_minutes); self.cool.setSuffix(" minutes between auto runs")
         self.echo = QLineEdit(s.echo_server); self.echo.setPlaceholderText("optional – host:40404 (run tools/echo_server.py there)")
         self.sites = QPlainTextEdit("\n".join(s.websites)); self.sites.setFixedHeight(110)
+        self.sched = QSpinBox(); self.sched.setRange(0, 1440); self.sched.setValue(s.sched_minutes); self.sched.setSpecialValueText("off"); self.sched.setSuffix(" min")
+        self.heavy = QCheckBox("Include speed + video tests in scheduled runs (uses data)"); self.heavy.setChecked(s.sched_heavy)
         self.video = QLineEdit(s.video_url); self.video.setPlaceholderText("blank = built-in sample videos")
         f.addRow("Probe interval", self.interval); f.addRow(self.auto); f.addRow("Auto-trigger after", self.outage)
         f.addRow("Cooldown", self.cool); f.addRow("Echo server", self.echo); f.addRow("Websites to test (one per line)", self.sites)
         f.addRow("Video test URL", self.video)
+        f.addRow("Run tests every (builds the test history)", self.sched); f.addRow(self.heavy)
         b = QPushButton("Save"); b.setObjectName("primary"); b.clicked.connect(self.accept); f.addRow(b)
 
     def apply(self, s: Settings):
         s.interval, s.auto_diag = self.interval.value(), self.auto.isChecked()
         s.outage_seconds, s.cooldown_minutes = self.outage.value(), self.cool.value()
+        s.sched_minutes, s.sched_heavy = self.sched.value(), self.heavy.isChecked()
         s.echo_server, s.video_url = self.echo.text().strip(), self.video.text().strip()
         s.websites = [x.strip() for x in self.sites.toPlainText().splitlines() if x.strip()]
 
@@ -78,6 +82,7 @@ class MainWindow(QMainWindow):
         self.sb = self.statusBar()
         for t in self.s.targets:
             self._add(t)
+        self.last_sched = time.time()
         self.tick = QTimer(self); self.tick.timeout.connect(self._tick); self.tick.start(1000)
         self._tick()
 
@@ -169,6 +174,9 @@ class MainWindow(QMainWindow):
         self._open_diag(reason=f"⚡ Started automatically: {mon.target} stopped responding for {self.s.outage_seconds} seconds.")
 
     def _tick(self):
+        if (self.s.sched_minutes and not self.diag.running and time.time() - self.last_sched >= self.s.sched_minutes * 60):
+            self.last_sched = time.time()
+            self.diag.start("Scheduled background run", scheduled=True)        # runs silently; results go to History
         n_bad = 0
         for i in range(self.tabs.count()):
             w = self.tabs.widget(i)
