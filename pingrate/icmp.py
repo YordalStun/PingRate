@@ -86,7 +86,7 @@ if sys.platform == "win32":
 
     def _ping_impl(ip, ttl, timeout_ms, size, df):
         dest = struct.unpack("<L", socket.inet_aton(ip))[0]
-        payload = ctypes.create_string_buffer(b"pingrate" * (size // 8 + 1), size)
+        payload = ctypes.create_string_buffer((b"pingrate" * (size // 8 + 1))[:size], size)
         opts = _IPOpt(ttl, 0, 0x02 if df else 0, 0, None)
         buf = ctypes.create_string_buffer(ctypes.sizeof(_EchoReply) + size + 64)
         t0 = time.perf_counter()
@@ -132,7 +132,8 @@ def _sim_ping(ip: str, ttl: int, timeout_ms: int) -> Reply:
     dist = 9
     mid = ip.split(".")[2]
     hop_ip = lambda t: ("192.168.1.1" if t == 1 else f"10.{mid}.{t}.1")
-    rtt = 3 + ttl * 3.5 + random.random() * 4 + (35 if ttl >= 5 else 0) + (random.random() * 90 if random.random() < 0.02 else 0)
+    hops = min(ttl, dist)
+    rtt = 3 + hops * 3.5 + random.random() * 4 + (35 if hops >= 5 else 0) + (random.random() * 90 if random.random() < 0.02 else 0)
     if broken and ttl >= 6:
         time.sleep(min(timeout_ms, 250) / 1000)
         return Reply(TIMEOUT)

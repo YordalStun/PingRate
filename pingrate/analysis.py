@@ -40,11 +40,11 @@ def _name(h: HopStats, n: int) -> str:
 def _where(i: int, last: int) -> str:
     n = i + 1
     if i == last:
-        return "the destination itself"
+        return "at the destination itself"
     if n == 1:
-        return "your own router / local network (Wi‑Fi, cable or router)"
+        return "in your own router / local network (Wi‑Fi, cable or router)"
     if n <= 3:
-        return "your ISP's access network, just outside your home"
+        return "in your ISP's access network, just outside your home"
     return "somewhere along the internet path between your ISP and the destination"
 
 

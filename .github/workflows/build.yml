@@ -1,0 +1,23 @@
+name: Build Windows exe
+on:
+  push:
+    branches: [main, "claude/**"]
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest -r requirements.txt
+      - run: python -m pytest -q tests
+      - run: ./build.bat
+        shell: cmd
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PingRate-windows
+          path: |
+            dist/PingRate.exe
+            dist/echo_server.py
