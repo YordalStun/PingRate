@@ -13,7 +13,13 @@ and a one-click (or automatic) diagnostics mode that finds out *why* your connec
   "I can see/hear others but they can't hear me" case), website load timing (DNS/connect/TLS/first byte), captive-portal
   check, MTU, speed test with **bufferbloat**, video-streaming stutter simulation, and an optional **echo server test**
   that separates upload loss from download loss. Ends with a written verdict you can copy/save.
-* Settings are stored in `%APPDATA%\PingRate\settings.json`.
+* **History** – every probe (destination and each hop) is stored locally as per-minute data for 8 days. The
+  📈 History window shows a week of loss and latency per target, a list of outages, per-hop loss over the period, and
+  every past diagnostics run with its full report.
+* **Full output** – the 📄 button saves one text file with everything (system/adapter info, settings, live route +
+  raw probes, the 7-day history, diagnostics results, JSON summary) prefixed with instructions, ready to paste to an AI
+  or send to support. It can run fresh diagnostics first.
+* Settings are stored in `%APPDATA%\PingRate\settings.json`; history in `%APPDATA%\PingRate\history.db`.
 
 ## Optional: echo server (per-direction loss)
 Run `echo_server.py` (included next to the exe, or `tools/echo_server.py`) on a machine outside your network

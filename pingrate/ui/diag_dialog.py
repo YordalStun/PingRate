@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import threading
 import time
 
@@ -21,9 +22,12 @@ class Bridge(QObject):
 
 
 class DiagnosticsDialog(QDialog):
-    def __init__(self, settings, collect_targets, parent=None):
+    completed = Signal()
+
+    def __init__(self, settings, collect_targets, history=None, parent=None):
         super().__init__(parent)
-        self.settings, self.collect_targets = settings, collect_targets
+        self.settings, self.collect_targets, self.history = settings, collect_targets, history
+        self.last_verdict: list = []
         self.setWindowTitle("PingRate – Diagnostics")
         self.resize(900, 680)
         self.bridge = Bridge()
@@ -99,10 +103,14 @@ class DiagnosticsDialog(QDialog):
         self.btn_run.setEnabled(True); self.btn_stop.setEnabled(False)
         self.status.setText("Finished." if not self.ctx.cancel.is_set() else "Stopped.")
         v = tests.verdict(self.results)
+        self.last_verdict = v
         worst = "bad" if any(l == "bad" for l, _ in v) else "warn" if any(l == "warn" for l, _ in v) else "ok"
         self.vtitle.setText({"bad": "Problem found", "warn": "Possible issues", "ok": "All clear"}[worst])
         self.vtext.setText("\n\n".join(("• " + s) for _, s in v))
         self._color(theme.LEVEL[worst])
+        if self.history and self.results and not self.ctx.cancel.is_set():
+            self.history.save_diag(self.reason.text(), [dataclasses.asdict(r) for r in self.results.values()], v, self.report())
+        self.completed.emit()
 
     def _color(self, col):
         self.verdict.setStyleSheet(f"QFrame#card{{border:1px solid {col};border-left:5px solid {col};}}")

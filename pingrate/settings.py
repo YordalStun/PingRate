@@ -6,11 +6,15 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 
-def _path() -> Path:
+def data_dir() -> Path:
     base = os.environ.get("APPDATA") or str(Path.home() / ".config")
     p = Path(base) / "PingRate"
     p.mkdir(parents=True, exist_ok=True)
-    return p / "settings.json"
+    return p
+
+
+def _path() -> Path:
+    return data_dir() / "settings.json"
 
 
 @dataclass

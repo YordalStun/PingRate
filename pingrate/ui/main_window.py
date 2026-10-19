@@ -2,15 +2,20 @@ from __future__ import annotations
 
 import time
 
+import os
+
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QColor
-from PySide6.QtWidgets import (QCheckBox, QDialog, QFormLayout, QHBoxLayout, QLineEdit, QMainWindow, QMessageBox,
+from PySide6.QtWidgets import (QApplication, QCheckBox, QDialog, QFormLayout, QHBoxLayout, QLineEdit, QFileDialog, QMainWindow, QMessageBox,
                                QPlainTextEdit, QPushButton, QSpinBox, QDoubleSpinBox, QTabWidget, QVBoxLayout, QWidget)
 
 from ..monitor import TargetMonitor
 from ..settings import Settings
 from . import theme
+from ..export import build_report
+from ..history import History
 from .diag_dialog import DiagnosticsDialog
+from .history_dialog import HistoryDialog
 from .target_tab import TargetTab
 
 
@@ -43,14 +48,16 @@ class OutageBridge(QObject):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, history: History | None = None):
         super().__init__()
         self.s = settings
+        self.hist = history
         self.setWindowTitle("PingRate – network ping & diagnostics")
         self.resize(1250, 880)
         self.last_auto = 0.0
         self.bridge = OutageBridge(); self.bridge.outage.connect(self._on_outage)
-        self.diag = DiagnosticsDialog(self.s, self._collect, self)
+        self.diag = DiagnosticsDialog(self.s, self._collect, self.hist, self)
+        self.history_dlg = HistoryDialog(self.hist, lambda: [self.tabs.widget(i).mon.target for i in range(self.tabs.count())], self) if self.hist else None
 
         root = QWidget(); root.setObjectName("root"); self.setCentralWidget(root)
         lay = QVBoxLayout(root); lay.setContentsMargins(16, 14, 16, 8)
@@ -59,8 +66,11 @@ class MainWindow(QMainWindow):
         self.entry.returnPressed.connect(self._add_from_entry)
         b_add = QPushButton("Add target"); b_add.setObjectName("primary"); b_add.clicked.connect(self._add_from_entry)
         b_diag = QPushButton("🩺  Diagnostics"); b_diag.setObjectName("diag"); b_diag.clicked.connect(lambda: self._open_diag(manual=True))
+        b_hist = QPushButton("📈  History"); b_hist.clicked.connect(self._open_history); b_hist.setEnabled(bool(self.hist))
+        b_full = QPushButton("📄  Full output"); b_full.setToolTip("Save everything to one file you can give to an AI / support"); b_full.clicked.connect(self._full_output)
         b_set = QPushButton("Settings"); b_set.clicked.connect(self._settings)
-        top.addWidget(self.entry, 1); top.addWidget(b_add); top.addSpacing(12); top.addWidget(b_diag); top.addWidget(b_set)
+        top.addWidget(self.entry, 1); top.addWidget(b_add); top.addSpacing(12); top.addWidget(b_diag); top.addWidget(b_hist)
+        top.addWidget(b_full); top.addWidget(b_set)
         lay.addLayout(top)
         self.tabs = QTabWidget(); self.tabs.setTabsClosable(True); self.tabs.setDocumentMode(True)
         self.tabs.tabCloseRequested.connect(self._close_tab)
@@ -83,7 +93,7 @@ class MainWindow(QMainWindow):
         for i in range(self.tabs.count()):
             if self.tabs.widget(i).mon.target.lower() == target.lower():
                 self.tabs.setCurrentIndex(i); return
-        mon = TargetMonitor(target, self.s.interval, self.s.outage_seconds, on_outage=self.bridge.outage.emit)
+        mon = TargetMonitor(target, self.s.interval, self.s.outage_seconds, on_outage=self.bridge.outage.emit, history=self.hist)
         tab = TargetTab(mon)
         mon.start()
         self.tabs.setCurrentIndex(self.tabs.addTab(tab, target))
@@ -103,6 +113,41 @@ class MainWindow(QMainWindow):
             for i in range(self.tabs.count()):
                 m = self.tabs.widget(i).mon
                 m.interval, m.outage_seconds = self.s.interval, self.s.outage_seconds
+
+    def _open_history(self):
+        self.history_dlg.show(); self.history_dlg.raise_(); self.history_dlg.activateWindow()
+
+    def _full_output(self):
+        ask = QMessageBox.question(self, "Full output",
+                                   "Run fresh diagnostics first? (about a minute – makes the file much more useful)\n\n"
+                                   "Yes = run tests, then save   ·   No = save what exists now",
+                                   QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel)
+        if ask == QMessageBox.StandardButton.Cancel:
+            return
+        if ask == QMessageBox.StandardButton.Yes and not self.diag.running:
+            self.diag.completed.connect(self._save_full, Qt.ConnectionType.SingleShotConnection)
+            self._open_diag(manual=True, reason="Collecting data for the full output file…")
+        else:
+            self._save_full()
+
+    def _save_full(self):
+        name = time.strftime("pingrate-full-%Y%m%d-%H%M%S.txt")
+        path, _ = QFileDialog.getSaveFileName(self, "Save full output", os.path.join(os.path.expanduser("~"), "Documents", name)
+                                              if os.path.isdir(os.path.join(os.path.expanduser("~"), "Documents")) else name, "Text (*.txt)")
+        if not path:
+            return
+        self.sb.showMessage("Collecting data…")
+        QApplication.processEvents()
+        mons = [self.tabs.widget(i).mon for i in range(self.tabs.count())]
+        text = build_report(self.s, mons, self.diag.results or None, self.diag.last_verdict, self.hist)
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(text)
+            self.sb.showMessage(f"Saved {path}", 8000)
+            QMessageBox.information(self, "Saved", f"Everything was saved to:\n{path}\n\nGive this file to an AI assistant (or support) – "
+                                                   "it starts with instructions explaining what to do with it.")
+        except OSError as e:
+            QMessageBox.warning(self, "Could not save", str(e))
 
     def _collect(self):
         out = []
@@ -135,4 +180,6 @@ class MainWindow(QMainWindow):
     def closeEvent(self, e):
         for i in range(self.tabs.count()):
             self.tabs.widget(i).close_tab()
+        if self.hist:
+            self.hist.flush()
         super().closeEvent(e)

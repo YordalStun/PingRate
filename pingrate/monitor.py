@@ -14,11 +14,12 @@ MAX_HOPS = 30
 
 
 class TargetMonitor:
-    def __init__(self, target: str, interval: float = 1.0, outage_seconds: int = 10, on_outage=None):
+    def __init__(self, target: str, interval: float = 1.0, outage_seconds: int = 10, on_outage=None, history=None):
         self.target = target
         self.interval = interval
         self.outage_seconds = outage_seconds
         self.on_outage = on_outage
+        self.history = history
         self.ip: str | None = None
         self.error: str | None = None
         self.hops: list[HopStats] = []
@@ -119,11 +120,14 @@ class TargetMonitor:
             if r.kind in (icmp.TTL_EXPIRED, icmp.OK):
                 h.add(r.rtt, r.addr, now)
                 self._lookup(h)
+                self._rec(h.ttl, r.rtt, r.addr, now)
             else:
                 h.add(None, None, now)
+                self._rec(h.ttl, None, None, now)
         r = f_dest.result()
         ok = r.kind == icmp.OK
         self.dest.add(r.rtt if ok else None, None, now)
+        self._rec(0, r.rtt if ok else None, ip, now)
         if ok:
             self.fail_since, self._outage_fired = None, False
         else:
@@ -135,6 +139,10 @@ class TargetMonitor:
                     self.on_outage(self)
                 except Exception:
                     pass
+
+    def _rec(self, ttl, rtt, addr, now) -> None:
+        if self.history:
+            self.history.add(self.target, ttl, rtt, addr, now)
 
     def _lookup(self, h: HopStats) -> None:
         a = h.addr

@@ -18,7 +18,10 @@ def main(argv=None) -> int:
     if demo:
         s.targets = ["demo-ok.example", "demo-outage.example"]
         s.save = lambda: None
-    w = MainWindow(s)
+    from .history import History
+    import tempfile, os
+    hist = History(os.path.join(tempfile.mkdtemp(), 'demo.db')) if demo else History()
+    w = MainWindow(s, hist)
     w.show()
     if "--shot" in argv:                      # headless screenshot for testing
         from PySide6.QtCore import QTimer
