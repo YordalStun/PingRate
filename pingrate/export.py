@@ -136,10 +136,47 @@ def diag_section(results: dict | None, verdict) -> tuple[str, list]:
             lines.append("         data: " + json.dumps({k: (sorted(v) if isinstance(v, set) else v) for k, v in r.data.items()},
                                                           default=str))
     lines += ["", "Automatic conclusions:"] + [f"  [{lvl}] {txt}" for lvl, txt in verdict]
+    from .diag.tests import causes
+    cs = causes(results)
+    if cs:
+        lines += ["", "Possible contributing causes (ranked; most are everyday causes):"]
+        for i, c in enumerate(cs, 1):
+            lines += [f"  {i}. {c['title']}", f"       why: {c['why']}", f"       try: {c['fix']}"]
     return "\n".join(lines), [dataclasses.asdict(r) for r in results.values()]
 
 
-def build_report(settings, monitors, diag_results=None, diag_verdict=None, hist=None, system=True) -> str:
+def incident_lines(monitors, link, hist) -> list[str]:
+    from . import incidents
+    out = ["A 'drop' = 3+ consecutive failed pings followed by recovery; >3 per hour is flagged as abnormal."]
+    now = time.time()
+    for m in monitors:
+        ev = m.events(now - 7 * 86400)
+        out.append(f"{m.target}: {len(ev)} drops in 7 days; last hour: {sum(1 for e in ev if e[1] >= now - 3600)}"
+                   + (f"; DOWN right now since {_ts(m.ongoing_drop_since)}" if m.ongoing_drop_since else ""))
+        for a in incidents.analyze_drops(ev, now, m.ongoing_drop_since, m.target):
+            out.append(f"  [{a.level}] {a.title}: {a.detail}")
+        out.append("  drops by hour of day (00..23): " + " ".join(str(x) for x in incidents.hour_histogram(ev, now - 7 * 86400)))
+        for a_, b_ in ev[-30:]:
+            out.append(f"    {_ts(a_)} -> {_ts(b_)} ({b_ - a_:.0f}s)")
+    if link:
+        lat = link.latest(60)
+        out.append(f"Link source: {link.source}" + (f"; upload capacity {link.cap_up / 1e6:.0f} Mbps" if link.cap_up else ""))
+        if lat:
+            f = lambda v: "n/a" if v is None else f"{v / 1e6:.2f}"
+            out.append(f"Last minute (Mbps): router up {f(lat['up'])} down {f(lat['down'])} | this PC up {f(lat['lup'])} down {f(lat['ldown'])}")
+        for a in incidents.analyze_link(list(link.samples), link.cap_up):
+            out.append(f"  [{a.level}] {a.title}: {a.detail}")
+        if link.router_error:
+            out.append(f"Router counters: {link.router_error}")
+    if hist:
+        for src in hist.link_sources():
+            ser = hist.link_series(src, now - 86400, 3600)
+            out.append(f"Link usage last 24h, hourly avg Mbps ({src}): " + "  ".join(
+                f"{time.strftime('%H:%M', time.localtime(r['t']))} up {r['up'] / 1e6:.1f}/down {r['down'] / 1e6:.1f}" for r in ser))
+    return out
+
+
+def build_report(settings, monitors, diag_results=None, diag_verdict=None, hist=None, system=True, link=None) -> str:
     parts = [PREAMBLE]
     jtargets = []
     if system:
@@ -157,6 +194,7 @@ def build_report(settings, monitors, diag_results=None, diag_verdict=None, hist=
         for t in hist.targets():
             if t not in known:
                 parts += [f"(target no longer monitored: {t})", *history_lines(hist, t), ""]
+    parts += ["=" * 70, "INCIDENT SIGNALS (drop patterns, link load)", "=" * 70, *incident_lines(monitors, link, hist), ""]
     parts += ["=" * 70, "DIAGNOSTICS (latest run)", "=" * 70]
     dtext, dj = diag_section(diag_results, diag_verdict or [])
     parts.append(dtext)

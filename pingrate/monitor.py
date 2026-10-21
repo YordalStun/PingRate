@@ -11,6 +11,7 @@ from .analysis import Finding, analyze_route
 from .stats import HopStats
 
 MAX_HOPS = 30
+DROP_RUN = 3          # consecutive failed pings that count as one 'drop'
 
 
 class TargetMonitor:
@@ -27,6 +28,9 @@ class TargetMonitor:
         self.dest_ttl: int | None = None
         self.paused = False
         self.fail_since: float | None = None
+        self.fail_run = 0                       # consecutive failed destination probes
+        self.fail_run_start = 0.0
+        self.drop_events: list[tuple[float, float]] = []   # (start, end) of runs of >= DROP_RUN failures
         self._outage_fired = False
         self._retrace = threading.Event()
         self._stop = threading.Event()
@@ -129,8 +133,14 @@ class TargetMonitor:
         self.dest.add(r.rtt if ok else None, None, now)
         self._rec(0, r.rtt if ok else None, ip, now)
         if ok:
+            if self.fail_run >= DROP_RUN:
+                self._drop(self.fail_run_start, now)
+            self.fail_run = 0
             self.fail_since, self._outage_fired = None, False
         else:
+            if self.fail_run == 0:
+                self.fail_run_start = now
+            self.fail_run += 1
             self.fail_since = self.fail_since or now
             if (not self._outage_fired and time.time() - self.fail_since >= self.outage_seconds
                     and self.on_outage):
@@ -139,6 +149,20 @@ class TargetMonitor:
                     self.on_outage(self)
                 except Exception:
                     pass
+
+    def _drop(self, start: float, end: float) -> None:
+        self.drop_events.append((start, end))
+        if self.history:
+            self.history.add_drop(self.target, start, end)
+
+    @property
+    def ongoing_drop_since(self) -> float | None:
+        return self.fail_run_start if self.fail_run >= DROP_RUN else None
+
+    def events(self, since: float) -> list[tuple[float, float]]:
+        if self.history:
+            return [(a, b) for a, b in self.history.drops(self.target, since)]
+        return [e for e in self.drop_events if e[1] >= since]
 
     def _rec(self, ttl, rtt, addr, now) -> None:
         if self.history:

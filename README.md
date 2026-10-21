@@ -20,6 +20,14 @@ and a one-click (or automatic) diagnostics mode that finds out *why* your connec
   DNS, website load, video start/stalls, …) **forever**, plotted over time (24 h … all time) with a pass/warn/fail
   timeline per test. Only the long text reports expire after 30 days. Set *Settings → Run tests every N minutes* to build
   this history automatically in the background (speed/video are skipped unless you opt in, to save data).
+* **Pattern detection** – flags repeating drop cycles (>3 drops of 3+ failed pings per hour, regular spacing, same
+  time of day on several days) and upload problems (upload near the link's capacity, or far above download), using the
+  router's own counters via UPnP (no setup) or SNMP (Settings). Also scans your LAN for Plex servers older than
+  1.43.3.10861 (Plex2Shell), lists ports your router forwards, and checks this PC against known attacker IPs/domains
+  (extend via `%APPDATA%\PingRate\iocs.json`). Results come with a calm, ranked list of *possible causes* – ordinary
+  ones first (big uploads, router restart, Wi‑Fi, ISP line, bufferbloat…); a compromised device is listed as a
+  "less common, cheap to rule out" possibility unless there is hard evidence. Run `tools/plex_server_check.sh` on the
+  Plex server for host-side checks (read-only).
 * **Full output** – the 📄 button saves one text file with everything (system/adapter info, settings, live route +
   raw probes, the 7-day history, diagnostics results, JSON summary) prefixed with instructions, ready to paste to an AI
   or send to support. It can run fresh diagnostics first.

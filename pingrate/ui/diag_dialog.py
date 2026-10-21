@@ -24,9 +24,9 @@ class Bridge(QObject):
 class DiagnosticsDialog(QDialog):
     completed = Signal()
 
-    def __init__(self, settings, collect_targets, history=None, parent=None):
+    def __init__(self, settings, collect_targets, history=None, parent=None, extra=None):
         super().__init__(parent)
-        self.settings, self.collect_targets, self.history = settings, collect_targets, history
+        self.settings, self.collect_targets, self.history, self.extra = settings, collect_targets, history, extra
         self.last_verdict: list = []
         self.scheduled = False
         self.setWindowTitle("PingRate – Diagnostics")
@@ -74,7 +74,9 @@ class DiagnosticsDialog(QDialog):
         self.vtitle.setText("Running tests…"); self.vtext.setText("Please wait – this takes about a minute.")
         self._color(theme.ACCENT)
         skip = {"speed", "video"} if scheduled and not self.settings.sched_heavy else set()
-        self.ctx = tests.Context(self.settings, self.collect_targets(), progress=self.bridge.progress.emit, skip=skip)
+        ex = self.extra() if self.extra else {}
+        self.ctx = tests.Context(self.settings, self.collect_targets(), progress=self.bridge.progress.emit, skip=skip,
+                                 link=ex.get("link"), drops=ex.get("drops", []))
         self.running = True
         self.btn_run.setEnabled(False); self.btn_stop.setEnabled(True)
         self.started = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -109,7 +111,12 @@ class DiagnosticsDialog(QDialog):
         self.last_verdict = v
         worst = "bad" if any(l == "bad" for l, _ in v) else "warn" if any(l == "warn" for l, _ in v) else "ok"
         self.vtitle.setText({"bad": "Problem found", "warn": "Possible issues", "ok": "All clear"}[worst])
-        self.vtext.setText("\n\n".join(("• " + s) for _, s in v))
+        text = "\n\n".join(("• " + s) for _, s in v)
+        cs = tests.causes(self.results)
+        if cs and worst != "ok":
+            text += "\n\nOther things that could be affecting it (most are everyday causes):\n" + "\n".join(
+                f"  {i}. {c['title']} – {c['why']}  → {c['fix']}" for i, c in enumerate(cs, 1))
+        self.vtext.setText(text)
         self._color(theme.LEVEL[worst])
         if self.history and self.results and not self.ctx.cancel.is_set():
             self.history.save_diag(self.reason.text(), [dataclasses.asdict(r) for r in self.results.values()], v, self.report(),

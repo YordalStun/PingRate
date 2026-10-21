@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDialog, QHBoxLayou
                                QPushButton, QScrollArea, QSplitter, QTableWidget, QTableWidgetItem, QTabWidget, QTreeWidget,
                                QTreeWidgetItem, QVBoxLayout, QWidget)
 
+from .. import incidents
 from ..diag.tests import METRIC_INFO
 from . import theme
 
@@ -102,6 +103,62 @@ class TrendsTab(QWidget):
         self.area.setWidget(inner)
 
 
+class DropsTab(QWidget):
+    """Time-of-day histogram of drops, upload/download usage, and the list of drop events."""
+
+    def __init__(self, history, targets_fn):
+        super().__init__()
+        self.h, self.targets_fn = history, targets_fn
+        v = QVBoxLayout(self)
+        row = QHBoxLayout()
+        self.target = QComboBox(); self.target.setMinimumWidth(220)
+        self.range = QComboBox(); self.range.addItems(["Last 24 hours", "Last 3 days", "Last 7 days"]); self.range.setCurrentIndex(2)
+        b = QPushButton("Refresh"); b.clicked.connect(self.refresh)
+        self.note = QLabel(""); self.note.setWordWrap(True); self.note.setStyleSheet(f"color:{theme.MUTED};")
+        row.addWidget(QLabel("Target:")); row.addWidget(self.target); row.addWidget(self.range); row.addWidget(b); row.addStretch()
+        v.addLayout(row); v.addWidget(self.note)
+        pg.setConfigOptions(antialias=True, background=theme.PANEL, foreground=theme.MUTED)
+        self.p_hour = pg.PlotWidget(); self.p_hour.setTitle("Drops by hour of day (same-time clustering = recurring background cause)", color=theme.MUTED, size="10pt")
+        self.p_hour.getAxis("bottom").setTicks([[(i, f"{i:02d}") for i in range(0, 24, 2)]])
+        self.p_link = pg.PlotWidget(axisItems={"bottom": pg.DateAxisItem()}); self.p_link.setTitle("Upload / download usage (Mbps)", color=theme.MUTED, size="10pt")
+        for p in (self.p_hour, self.p_link):
+            p.showGrid(x=True, y=True, alpha=0.15); p.setMouseEnabled(True, False); p.hideButtons()
+        v.addWidget(self.p_hour, 2); v.addWidget(self.p_link, 3)
+        self.table = _table(["Drop started", "Ended", "Length"]); v.addWidget(self.table, 2)
+        self.target.currentIndexChanged.connect(self.refresh); self.range.currentIndexChanged.connect(self.refresh)
+
+    def load_targets(self):
+        cur = self.target.currentText()
+        names = list(dict.fromkeys(self.targets_fn() + self.h.targets()))
+        self.target.blockSignals(True); self.target.clear(); self.target.addItems(names)
+        if cur in names:
+            self.target.setCurrentText(cur)
+        self.target.blockSignals(False)
+
+    def refresh(self):
+        t = self.target.currentText()
+        days = {0: 1, 1: 3, 2: 7}[self.range.currentIndex()]
+        since = time.time() - days * 86400
+        ev = self.h.drops(t, since) if t else []
+        self.p_hour.clear(); self.p_link.clear()
+        hh = incidents.hour_histogram(ev, since)
+        self.p_hour.addItem(pg.BarGraphItem(x=list(range(24)), height=hh, width=0.8, brush=pg.mkBrush(255, 180, 84, 200), pen=None))
+        alerts = incidents.analyze_drops(ev, None, None, t) if t else []
+        self.note.setText(f"{len(ev)} drop(s) (3+ failed pings in a row) in this period. " + " ".join(a.title for a in alerts))
+        src = "router" if "router" in self.h.link_sources() else "pc"
+        ser = self.h.link_series(src, since, {1: 300, 3: 900, 7: 1800}[days])
+        if ser:
+            xs = [r["t"] for r in ser]
+            self.p_link.addLegend(offset=(-10, 10))
+            self.p_link.plot(xs, [r["up"] / 1e6 for r in ser], pen=pg.mkPen(theme.WARN, width=2), name=f"Upload ({'router WAN' if src == 'router' else 'this PC'})")
+            self.p_link.plot(xs, [r["down"] / 1e6 for r in ser], pen=pg.mkPen(theme.ACCENT, width=2), name="Download")
+            self.p_link.getViewBox().setLimits(yMin=0)
+        self.table.setRowCount(len(ev))
+        for i, (a, b) in enumerate(reversed(ev)):
+            for c, x in enumerate([_t(a), _t(b), f"{b - a:.0f} s"]):
+                self.table.setItem(i, c, QTableWidgetItem(x))
+
+
 class HistoryDialog(QDialog):
     def __init__(self, history, current_targets, parent=None):
         super().__init__(parent)
@@ -136,6 +193,8 @@ class HistoryDialog(QDialog):
 
         self.trends = TrendsTab(self.h)
         tabs.addTab(self.trends, "Test trends")
+        self.drops_tab = DropsTab(self.h, self.current_targets)
+        tabs.addTab(self.drops_tab, "Drops && link")
 
         # ---- diagnostics runs
         d = QWidget(); dv = QVBoxLayout(d)
@@ -161,6 +220,7 @@ class HistoryDialog(QDialog):
         if cur in names:
             self.target.setCurrentText(cur)
         self.target.blockSignals(False)
+        self.drops_tab.load_targets()
         self.refresh()
 
     def refresh(self):
@@ -191,6 +251,7 @@ class HistoryDialog(QDialog):
             self._fill_out(self.h.outages(t, since)); self._fill_hops(self.h.hop_loss(t, since))
         self._fill_runs()
         self.trends.refresh()
+        self.drops_tab.refresh()
 
     def _fill_out(self, outs):
         self.t_out.setRowCount(len(outs))

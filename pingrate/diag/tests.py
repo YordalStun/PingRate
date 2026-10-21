@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import statistics
 import threading
+import time
 from dataclasses import dataclass, field
 
 from .. import icmp
@@ -28,6 +29,8 @@ class Context:
     targets: list = field(default_factory=list)     # [(name, level, title, detail)]
     cancel: threading.Event = field(default_factory=threading.Event)
     progress: object = lambda msg: None
+    link: object = None                             # LinkMonitor
+    drops: list = field(default_factory=list)       # [(target, events, ongoing_since)]
     skip: set = field(default_factory=set)         # test keys to skip, e.g. {'speed','video'}
     results: dict = field(default_factory=dict)
 
@@ -339,6 +342,135 @@ def t_video(c: Context) -> Result:
     return r
 
 
+
+def t_drops(c: Context) -> Result:
+    from .. import incidents
+    r = Result("drops", "Repeating-drop pattern")
+    if not c.drops:
+        r.summary = "No monitored targets"
+        return r
+    alerts, worst1h = [], 0
+    for target, events, ongoing in c.drops:
+        alerts += incidents.analyze_drops(events, None, ongoing, target)
+        now = time.time()
+        worst1h = max(worst1h, sum(1 for e in events if e[1] >= now - 3600) + (1 if ongoing else 0))
+        r.details.append(f"{target}: {len(events)} drop(s) recorded in the last 7 days"
+                         + (" – currently DOWN" if ongoing else ""))
+    r.data = {"drops_1h": worst1h}
+    for a in alerts:
+        r.details.append(f"[{a.level}] {a.title}: {a.detail}")
+    r.status = FAIL if any(a.level == "bad" for a in alerts) else WARN if alerts else PASS
+    r.summary = alerts[0].title if alerts else f"No abnormal drop pattern (max {worst1h} drop(s) in the last hour)"
+    return r
+
+
+def t_link(c: Context) -> Result:
+    from .. import incidents
+    r = Result("link", "Upload / download load")
+    lm = c.link
+    if lm is None:
+        r.summary = "Link monitor not running"
+        return r
+    c.progress("Reading link usage…")
+    lat = lm.latest(60)
+    if not lat:
+        r.summary = "Still collecting link samples – try again in a minute"
+        return r
+    mb = lambda v: "n/a" if v is None else f"{v / 1e6:.2f} Mbps"
+    r.details.append(f"Source: {lm.source}")
+    if lm.cap_up:
+        r.details.append(f"Upload capacity: {lm.cap_up / 1e6:.0f} Mbps" + (" (from settings)" if lm.s.link_up_mbps else " (reported by router)"))
+    if lm.router_error:
+        r.details.append(f"Router counters: {lm.router_error}")
+    r.details.append(f"Last minute – router WAN: up {mb(lat['up'])}, down {mb(lat['down'])};  this PC: up {mb(lat['lup'])}, down {mb(lat['ldown'])}")
+    up = lat["up"] if lat["up"] is not None else lat["lup"]
+    dn = lat["down"] if lat["down"] is not None else lat["ldown"]
+    r.data = {"up": up / 1e6, "down": dn / 1e6, "pc_up": lat["lup"] / 1e6}
+    alerts = incidents.analyze_link(list(lm.samples), lm.cap_up)
+    for a in alerts:
+        r.details.append(f"[{a.level}] {a.title}: {a.detail}")
+    if not lm.router:
+        r.details.append("Tip: without router counters only this PC's own traffic is visible. Enable UPnP on the router or set SNMP in Settings "
+                         "to see traffic from every device (e.g. a Plex server).")
+    r.status = FAIL if any(a.level == "bad" for a in alerts) else WARN if alerts else PASS
+    r.summary = alerts[0].title if alerts else f"Normal load (up {mb(up)}, down {mb(dn)})"
+    return r
+
+
+def t_plex(c: Context) -> Result:
+    from .. import plex
+    r = Result("plex", "Plex servers on your LAN (Plex2Shell)")
+    if not c.settings.plex_scan:
+        r.summary = "LAN scan disabled in Settings"
+        return r
+    servers, ip = plex.scan_lan(c.progress)
+    if ip is None:
+        r.status, r.summary = WARN, "Could not determine your local network"
+        return r
+    if not servers:
+        r.status, r.summary = PASS, "No Plex server found on your local network"
+        return r
+    bad = 0
+    for sv in servers:
+        v = sv["vulnerable"]
+        bad += bool(v)
+        r.details.append(f"{sv['host']}: Plex {sv['version'] or 'unknown version'} – "
+                         + ("VULNERABLE (fixed in 1.43.3.10861)" if v else "patched" if v is False else "version unknown"))
+    r.data = {"vulnerable": bad}
+    r.status = FAIL if bad else PASS
+    r.summary = (f"{bad} vulnerable Plex server(s) – update to 1.43.3.10861+" if bad else f"{len(servers)} Plex server(s), all patched")
+    return r
+
+
+RISKY_PORTS = {22: "SSH", 23: "Telnet", 445: "SMB", 3389: "Remote Desktop", 5900: "VNC", 32400: "Plex"}
+
+
+def t_exposure(c: Context) -> Result:
+    r = Result("exposure", "Ports forwarded to the internet (UPnP)")
+    lm = c.link
+    router = getattr(lm, "router", None) if lm else None
+    if not router or not hasattr(router, "port_mappings"):
+        r.summary = "Router doesn't expose UPnP port-mapping info – check the router's port-forwarding page for 32400 (Plex)"
+        return r
+    c.progress("Reading port forwards from router…")
+    try:
+        maps = router.port_mappings()
+    except Exception as e:
+        r.status, r.summary = WARN, f"Could not read port mappings: {e}"
+        return r
+    ext = router.external_ip()
+    if ext:
+        r.details.append(f"Router's public IP: {ext}")
+    plex_open = [m for m in maps if m["ext_port"] == 32400 or m["int_port"] == 32400]
+    risky = [m for m in maps if m["int_port"] in RISKY_PORTS and m not in plex_open]
+    for m in maps:
+        r.details.append(f"{m['proto']} {m['ext_port']} → {m['client']}:{m['int_port']}  {m['desc']}" + ("" if m["enabled"] else "  (disabled)"))
+    r.data = {"mappings": len(maps), "plex_open": len(plex_open)}
+    if plex_open:
+        r.status = WARN
+        r.summary = f"Plex port 32400 is forwarded to the internet (→ {plex_open[0]['client']})"
+    elif risky:
+        r.status, r.summary = WARN, f"{len(risky)} sensitive port(s) forwarded ({', '.join(RISKY_PORTS[m['int_port']] for m in risky)})"
+    else:
+        r.status, r.summary = PASS, f"{len(maps)} port forward(s), none sensitive" if maps else "No ports forwarded via UPnP"
+    return r
+
+
+def t_ioc(c: Context) -> Result:
+    from .. import ioc
+    r = Result("ioc", "Known attacker infrastructure (this PC)")
+    c.progress("Checking connections against known-bad IPs…")
+    lst = ioc.load()
+    hits = ioc.check_connections(lst) + ioc.check_dns_cache(lst)
+    r.details.append(f"Checked {len(lst['ips'])} IPs and {len(lst['domains'])} domains (add your own in %APPDATA%\\PingRate\\iocs.json)")
+    for what, why in hits:
+        r.details.append(f"MATCH: {what} – {why}")
+    r.data = {"matches": len(hits)}
+    r.status = FAIL if hits else PASS
+    r.summary = f"{len(hits)} match(es) – this PC is talking to known attacker infrastructure" if hits else "No connections to known attacker IPs/domains"
+    return r
+
+
 def t_targets(c: Context) -> Result:
     r = Result("targets", "Your monitored targets")
     if not c.targets:
@@ -355,7 +487,8 @@ def t_targets(c: Context) -> Result:
     return r
 
 
-TESTS = [t_gateway, t_internet, t_dns, t_tcp, t_udp, t_echo, t_websites, t_captive, t_mtu, t_speed, t_video, t_targets]
+TESTS = [t_gateway, t_internet, t_dns, t_tcp, t_udp, t_echo, t_websites, t_captive, t_mtu, t_speed, t_video,
+         t_drops, t_link, t_plex, t_exposure, t_ioc, t_targets]
 
 
 def run_all(c: Context, on_result=lambda r: None) -> list[Result]:
@@ -435,6 +568,28 @@ def verdict(results: dict[str, Result]) -> list[tuple[str, str]]:
     c = g("captive")
     if c and c.status == WARN and "intercept" in c.summary:
         out.append(("warn", "A login page or filter seems to be intercepting traffic (captive portal)."))
+    io, px, ex, dr, lk = g("ioc"), g("plex"), g("exposure"), g("drops"), g("link")
+    if dr and dr.status == FAIL and lk and lk.status == FAIL:
+        out.insert(0, ("bad", "Your connection keeps dropping and recovering while the upload link is saturated or lopsided. A busy upload "
+                              "starves the router's keep-alives, so the ISP resets the session. Usually the cause is something ordinary "
+                              "(cloud backup, torrent, remote streaming, someone uploading video). Check the 'Drops & link' tab: if this PC "
+                              "sends little, another device is the sender. Less commonly a device is being misused – see the possible "
+                              "causes below."))
+    elif dr and dr.status == FAIL:
+        out.append(("bad", "Your connection repeatedly drops and recovers in a cycle (" + dr.summary + "). See the possible causes below; "
+                           "comparing with upload usage often finds the reason."))
+    elif lk and lk.status == FAIL:
+        out.append(("warn", "Your upload link is saturated or lopsided (" + lk.summary + "). Find what is sending the data."))
+    if px and px.status == FAIL:
+        out.insert(0, ("warn", "A Plex server on your network is an older version with known security flaws (Plex2Shell). Updating to "
+                               "1.43.3.10861 or newer is recommended. If port 32400 is open to the internet it is worth a quick check – "
+                               "tools/plex_server_check.sh does this on the server."))
+    if ex and ex.status == WARN and ex.data.get("plex_open"):
+        out.append(("warn", "Your router forwards Plex (32400) to the internet. That's fine if the server is up to date; remove the "
+                            "forward if you don't need remote access."))
+    if io and io.status == FAIL:
+        out.insert(0, ("warn", "This PC has a connection to an address on the Plex2Shell attacker list (" + io.details[-1] + "). It can be a "
+                               "coincidence or a stale list entry, but a malware scan is a sensible next step."))
     t = g("targets")
     if t and t.status != PASS and t.status != SKIP:
         out.append(("warn", "Your monitored targets show problems – open their tabs to see exactly which hop loses traffic."))
@@ -454,7 +609,8 @@ METRIC_INFO = {   # key -> (label, unit)
     "echo_down_loss": ("Download loss (echo server)", "%"), "speed_down": ("Download", "Mbps"),
     "speed_up": ("Upload", "Mbps"), "bloat_down": ("Extra ping under download", "ms"),
     "bloat_up": ("Extra ping under upload", "ms"), "video_startup_s": ("Video start time", "s"),
-    "video_stalls": ("Video stalls", ""), "video_stall_s": ("Video frozen time", "s"), "video_mbps": ("Video throughput", "Mbps"),
+    "drops_1h": ("Connection drops in last hour", ""), "link_up_mbps": ("Link upload", "Mbps"),
+    "link_down_mbps": ("Link download", "Mbps"), "video_stalls": ("Video stalls", ""), "video_stall_s": ("Video frozen time", "s"), "video_mbps": ("Video throughput", "Mbps"),
 }
 
 
@@ -478,6 +634,8 @@ def metrics(results: dict) -> dict[str, float]:
     put("web_ms", w.get("avg"))
     put("speed_down", sp.get("down")); put("speed_up", sp.get("up"))
     put("bloat_down", sp.get("bloat_down")); put("bloat_up", sp.get("bloat_up"))
+    lk, dr = d("link"), d("drops")
+    put("link_up_mbps", lk.get("up")); put("link_down_mbps", lk.get("down")); put("drops_1h", dr.get("drops_1h"))
     if v.get("loaded"):
         put("video_startup_s", v.get("startup")); put("video_stalls", v.get("stalls"))
         put("video_stall_s", v.get("stall_time")); put("video_mbps", v.get("mbps"))
@@ -486,3 +644,68 @@ def metrics(results: dict) -> dict[str, float]:
 
 def statuses(results: dict) -> dict[str, tuple[str, str]]:
     return {k: (r.status, r.summary) for k, r in results.items() if r.status != SKIP}
+
+
+# --------------------------------------------------------------------------- "what else could it be"
+def causes(results: dict, limit: int = 6) -> list[dict]:
+    """Ranked, calm list of things that could be contributing. Ordinary causes first; security only with evidence."""
+    g = results.get
+    st = lambda k: g(k).status if g(k) else SKIP
+    data = lambda k: (g(k).data if g(k) else None) or {}
+    out: list[dict] = []
+
+    def add(w, title, why, fix):
+        out.append(dict(weight=w, title=title, why=why, fix=fix))
+    drops, link = st("drops") in (WARN, FAIL), st("link") in (WARN, FAIL)
+    if link or drops:
+        add(3 if link else 1.5, "Something is using a lot of upload",
+            "Cloud backup or photo sync (OneDrive, Google Photos, iCloud), torrents, game or Windows updates sharing, a Plex/Jellyfin "
+            "remote stream, or someone uploading or live-streaming video can fill the upload and make everything else lag or drop.",
+            "Pause backups and torrents, check Task Manager → Performance → Ethernet/Wi‑Fi, and look at per-device usage in your router.")
+    if drops:
+        add(2.5, "Router or modem needs a restart (or is overheating)",
+            "Routers that run for months can get unstable, overheat, or run out of memory, which looks like regular short drops.",
+            "Power-cycle the modem and router (30 s off), give them airflow, and install the latest router firmware.")
+        add(2, "A line or ISP-side fault",
+            "Noise on the line, a loose or damaged connector, or an ISP issue shows up as repeated session resets.",
+            "Check the router's log for 'PPPoE' / 'link down' entries, re-seat the cables, and ask your ISP to test the line.")
+    gw = g("gateway")
+    if gw and gw.status in (WARN, FAIL) and gw.data:
+        add(2.5, "Wi‑Fi interference or a weak/loose local connection",
+            "Packet loss or high ping to your own router means the problem is between this PC and the router.",
+            "Try a network cable, move closer to the router, change the Wi‑Fi channel, and check the cable ends.")
+    sp = data("speed")
+    if max(sp.get("bloat_down") or 0, sp.get("bloat_up") or 0) > 100:
+        add(2.5, "Bufferbloat",
+            "Latency balloons when the line is busy, so games and calls lag whenever anyone downloads or uploads.",
+            "Enable SQM / Smart Queue / QoS on the router (set it to ~90–95% of your real speed), or pause big transfers.")
+    if st("udp") in (WARN, FAIL):
+        add(2, "Router, firewall or NAT handling UDP badly",
+            "Games and voice chat use UDP. Strict NAT, blocked ports or an over-eager firewall/antivirus can break one direction.",
+            "Enable UPnP on the router, check Windows Firewall / antivirus rules for the game, or try the router's DMZ/port forwarding.")
+    if st("dns") in (WARN, FAIL):
+        add(2, "DNS (name lookup) problems", "Slow or failing name lookups make sites hang even though the connection is fine.",
+            "Set DNS to 1.1.1.1 / 8.8.8.8 in your adapter or router.")
+    if st("web") in (WARN, FAIL) and st("tcp") != FAIL:
+        add(1.5, "VPN, proxy, antivirus web-shield or DNS filter",
+            "Software sitting in the middle can block or slow some sites while pings look perfect.",
+            "Temporarily turn off the VPN / web-shield and test again.")
+    if st("video") in (WARN, FAIL) and st("speed") == PASS:
+        add(1.5, "Peak-time congestion or the streaming service itself",
+            "Speed is fine but video stutters – often evening congestion in the ISP network or the far end.",
+            "Compare at a different time of day and with another service.")
+    if g("drops") and "cluster" in " ".join(g("drops").details):
+        add(1.5, "A scheduled task or evening congestion",
+            "Drops at the same time on several days usually mean something runs on a schedule (backups, updates, a household routine) "
+            "or your area is busiest then.", "Note what runs at those hours; compare with the time-of-day chart in History.")
+    if drops or link:
+        add(0.8, "A device being misused (less common, cheap to rule out)",
+            "Devices reachable from the internet that are out of date – a Plex server, NAS, camera or old router – can occasionally be "
+            "hijacked to send traffic. It is rarely the cause, but easy to rule out.",
+            "Update those devices, remove unneeded port forwards (32400, 22, 3389…), and look at which device is sending data in your router.")
+    if st("plex") == FAIL or st("ioc") == FAIL or data("exposure").get("plex_open"):
+        add(2.8, "Security: an out-of-date exposed service or a listed bad address",
+            "The checks found an old Plex version, a Plex forward to the internet, or a connection to an address on a known-bad list.",
+            "Update Plex to 1.43.3.10861+, close port 32400 until updated, run tools/plex_server_check.sh on the server, and run a malware scan.")
+    out.sort(key=lambda d: -d["weight"])
+    return out[:limit]

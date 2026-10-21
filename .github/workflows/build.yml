@@ -24,6 +24,16 @@ jobs:
           Start-Sleep 3
           if ($p.HasExited) { throw "echo server exe exited immediately" }
           Stop-Process $p
+      - name: Smoke-test the app exe starts (demo mode, offscreen)
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+          APPDATA: ${{ runner.temp }}
+        run: |
+          $p = Start-Process -FilePath dist\PingRate.exe -ArgumentList "--demo" -PassThru
+          Start-Sleep 12
+          if ($p.HasExited) { throw "PingRate.exe exited early (exit code $($p.ExitCode))" }
+          Stop-Process $p
       - uses: actions/upload-artifact@v4
         with:
           name: PingRate-windows

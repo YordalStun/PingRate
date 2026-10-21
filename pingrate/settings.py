@@ -28,6 +28,12 @@ class Settings:
     websites: list[str] = field(default_factory=lambda: [
         "https://www.google.com", "https://www.cloudflare.com", "https://www.wikipedia.org",
         "https://www.amazon.com", "https://www.youtube.com"])
+    upnp_enabled: bool = True        # read router WAN counters / port forwards via UPnP
+    snmp_host: str = ""              # optional: router SNMP (overrides UPnP counters)
+    snmp_community: str = "public"
+    snmp_ifindex: int = 0            # ifIndex of the router's WAN interface
+    link_up_mbps: float = 0.0        # your upload capacity if the router doesn't report it (0 = auto)
+    plex_scan: bool = True           # scan the local /24 for Plex servers and check their version
     sched_minutes: int = 0           # run diagnostics in the background every N minutes (0 = off)
     sched_heavy: bool = False        # include speed + video tests (uses bandwidth) in scheduled runs
     video_url: str = ""              # blank = built-in list of sample videos
